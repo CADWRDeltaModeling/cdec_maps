@@ -5,7 +5,7 @@ import panel as pn
 pn.extension(
     "gridstack", "tabulator", "codeeditor", notifications=True, design="native"
 )
-from pydelmod.dvue import fullscreen
+from dvue import fullscreen
 
 main_panel = pn.Column(
     pn.indicators.LoadingSpinner(

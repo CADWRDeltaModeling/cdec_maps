@@ -18,10 +18,8 @@ import panel as pn
 
 pn.extension()
 #
-from vtools.functions.filter import cosine_lanczos
-
-from pydelmod.dvue.dataui import DataUI, full_stack
-from pydelmod.dvue.tsdataui import TimeSeriesDataUIManager
+from dvue.dataui import DataUI, full_stack
+from dvue.tsdataui import TimeSeriesDataUIManager
 from . import cdec
 
 
@@ -36,6 +34,11 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
     bypass_cache = param.Boolean(
         default=False,
         doc="Bypass cache for reading data. Still builds cache but rebuilds from CDEC.",
+    )
+
+    do_tidal_filter = param.Boolean(
+        default=False,
+        doc="Apply cosine-Lanczos tidal filter to data before plotting.",
     )
 
     def __init__(self, dfcat, reader, **kwargs):
@@ -64,8 +67,8 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         cb = TqdmCallback(desc="cdec", tqdm_class=tqdm.tqdm)
         cb.register()
         control_widgets = super().get_widgets()
-        #control_widgets.append(pn.WidgetBox())
-        #control_widgets.append(pn.Row(self.param.bypass_cache))
+        # control_widgets.append(pn.WidgetBox())
+        # control_widgets.append(pn.Row(self.param.bypass_cache))
         return control_widgets
 
     # data related methods

@@ -5,11 +5,11 @@ channels:
 dependencies:
   - python
   - pip
-  - ipykernel
+  #- ipykernel
   - pyarrow
   - pandas
   - dask
-  - numba
+  #- numba
   - aiohttp
   - requests
   - decorator
@@ -20,14 +20,12 @@ dependencies:
   - geopandas
   - holoviews
   - hvplot
-  - matplotlib
+  #- matplotlib
   - bokeh
   - geoviews
-  - spatialpandas
+  #- spatialpandas
   - panel
   - diskcache
   - tqdm
-  - vtools3
-  - pydsm
-  - pydelmod
-#  pip install -e . --no-deps
+  - pip:
+    - git+https://github.com/CADWRDeltaModeling/dvue
