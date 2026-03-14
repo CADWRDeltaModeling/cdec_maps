@@ -18,9 +18,59 @@ import panel as pn
 
 pn.extension()
 #
+<<<<<<< HEAD
+=======
+from vtools.functions.filter import cosine_lanczos
+
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
+>>>>>>> 83c7d6d (moved cdecui to dvue)
 from dvue.dataui import DataUI, full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager
 from . import cdec
+
+
+class CDECDataReferenceReader(DataReferenceReader):
+    """Reads a single CDEC time series given station/sensor/duration attributes.
+
+    A single instance is shared across all DataReference objects in the catalog
+    (flyweight pattern).  When ``time_range`` is present in the attributes
+    passed by DataReference.getData(), only that window is requested from CDEC.
+
+    Parameters
+    ----------
+    reader : cdec.Reader
+        The CDEC reader instance used to fetch data.
+    """
+
+    def __init__(self, reader) -> None:
+        self._reader = reader
+
+    def load(self, **attributes) -> pd.DataFrame:
+        station_id = attributes["ID"]
+        sensor_desc = attributes["Sensor"]
+        sensor_number = attributes["Sensor Number"]
+        duration_code = attributes["duration_code"]
+        unit = attributes["Units"]
+        time_range = attributes.get("time_range")
+        if time_range is not None:
+            start = pd.Timestamp(time_range[0]).strftime("%Y-%m-%d")
+            end = pd.Timestamp(time_range[1]).strftime("%Y-%m-%d")
+        else:
+            start = "1900-01-01"
+            end = pd.Timestamp.now().strftime("%Y-%m-%d")
+        df = self._reader.read_station_data(
+            station_id, sensor_number, duration_code, start, end
+        )
+        df = df[["VALUE"]]
+        df.columns = [f"{station_id}/{sensor_desc}"]
+        df = df[slice(df.first_valid_index(), df.last_valid_index())]
+        ptype = "instantaneous" if duration_code == "E" else "period-averaged"
+        df.attrs["unit"] = unit
+        df.attrs["ptype"] = ptype
+        return df
+
+    def __repr__(self) -> str:
+        return f"CDECDataReferenceReader(reader={self._reader!r})"
 
 
 class CDECDataUIManager(TimeSeriesDataUIManager):
@@ -55,6 +105,14 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         all_sensor_types = self.dfcat["Sensor"].unique()
         self.param.sensor_selections.objects = all_sensor_types
         self.sensor_selections = list(all_sensor_types)
+        # Build the dvue catalog
+        self._dvue_reader = CDECDataReferenceReader(reader)
+        geo_crs = (
+            str(self.dfcat.crs)
+            if hasattr(self.dfcat, "crs") and self.dfcat.crs is not None
+            else None
+        )
+        self._dvue_catalog = self._build_dvue_catalog(geo_crs)
         super().__init__(filename_column="Source", **kwargs)
         self.color_cycle_column = "ID"
         self.dashed_line_cycle_column = "Duration"
@@ -70,6 +128,27 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         # control_widgets.append(pn.WidgetBox())
         # control_widgets.append(pn.Row(self.param.bypass_cache))
         return control_widgets
+
+    @property
+    def data_catalog(self) -> DataCatalog:
+        return self._dvue_catalog
+
+    def _build_dvue_catalog(self, crs=None) -> DataCatalog:
+        catalog = DataCatalog(crs=crs)
+        for _, row in self.dfcat.iterrows():
+            duration_code = cdec.get_duration_code(row["Duration"])
+            ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
+            attrs = {k: v for k, v in row.items() if k != "geometry"}
+            if "geometry" in row.index and row["geometry"] is not None:
+                attrs["geometry"] = row["geometry"]
+            attrs["duration_code"] = duration_code
+            catalog.add(DataReference(
+                self._dvue_reader,
+                name=ref_name,
+                cache=True,
+                **attrs,
+            ))
+        return catalog
 
     # data related methods
     def get_data_catalog(self):
@@ -204,27 +283,15 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         )
 
     def get_data_for_time_range(self, row, time_range):
-        irreg = False  # TODO: set this based on some metadata, but for now all is regular time series
-        unit = row["Units"]
-        station_id = row["ID"]
-        sensor_desc = row["Sensor"]
-        sensor_number = row["Sensor Number"]
         duration_code = cdec.get_duration_code(row["Duration"])
-        start = time_range[0].strftime("%Y-%m-%d")
-        end = time_range[1].strftime("%Y-%m-%d")
+        ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
+        ref = self._dvue_catalog.get(ref_name)
         if self.bypass_cache:
-            df = self.reader.remove_from_db(
-                station_id,
-                sensor_number,
-                duration_code,
-            )
-        df = self.reader.read_station_data(
-            station_id, sensor_number, duration_code, start, end
-        )
-        df = df[["VALUE"]]
-        df.columns = [f"{station_id}/{sensor_desc}"]
-        df = df[slice(df.first_valid_index(), df.last_valid_index())]
-        ptype = "instantaneous" if duration_code == "E" else "period-averaged"
+            self.reader.remove_from_db(row["ID"], row["Sensor Number"], duration_code)
+            ref.invalidate_cache()
+        df = ref.getData(time_range=time_range)
+        unit = df.attrs.get("unit", "")
+        ptype = df.attrs.get("ptype", "period-averaged")
         # infer freq type if tidal filtering is needed
         if self.do_tidal_filter:
             # if duration code is given use that else infer from the data

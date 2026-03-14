@@ -10,12 +10,14 @@ from dvue import fullscreen
 main_panel = pn.Column(
     pn.indicators.LoadingSpinner(
         value=True, color="primary", size=50, name="Loading..."
-    )
+    ),
+    sizing_mode="stretch_both",
 )
 sidebar_panel = pn.Column(
     pn.indicators.LoadingSpinner(
         value=True, color="primary", size=50, name="Loading..."
-    )
+    ),
+    sizing_mode="stretch_both",
 )
 template = pn.template.VanillaTemplate(
     title="CDEC Map Explorer",
