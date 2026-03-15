@@ -74,7 +74,7 @@ class CDECDataReferenceReader(DataReferenceReader):
 
 
 class CDECDataUIManager(TimeSeriesDataUIManager):
-
+    show_math_ref_editor = param.Boolean(default=False)
     sensor_selections = param.ListSelector(
         objects=["RIV STG"],
         default=["RIV STG"],
