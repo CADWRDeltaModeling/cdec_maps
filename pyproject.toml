@@ -44,3 +44,4 @@ cdec_maps = "cdec_maps.cli:cli"
 
 [tool.setuptools_scm]
 write_to = "cdec_maps/_version.py"
+fallback_version = "0.0.0"
