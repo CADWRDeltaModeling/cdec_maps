@@ -25,6 +25,8 @@ from dvue.dataui import DataUI, full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager
 from . import cdec
 
+__all__ = ["CDECDataReferenceReader", "CDECDataReference", "CDECDataUIManager", "show_cdec_ui"]
+
 
 class CDECDataReferenceReader(DataReferenceReader):
     """Reads a single CDEC time series given station/sensor/duration attributes.
@@ -33,14 +35,27 @@ class CDECDataReferenceReader(DataReferenceReader):
     (flyweight pattern).  When ``time_range`` is present in the attributes
     passed by DataReference.getData(), only that window is requested from CDEC.
 
+    Standalone: ``reader`` is optional.  When omitted a default
+    :class:`cdec.Reader` is created lazily on the first :meth:`load` call so
+    that the reader — and any :class:`CDECDataReference` wired to it — can be
+    used outside a :class:`CDECDataUIManager` context (e.g. in a mixed
+    catalog).
+
     Parameters
     ----------
-    reader : cdec.Reader
-        The CDEC reader instance used to fetch data.
+    reader : cdec.Reader, optional
+        The CDEC reader instance used to fetch data.  When *None* a default
+        ``cdec.Reader()`` is created on first use.
     """
 
-    def __init__(self, reader) -> None:
+    def __init__(self, reader=None) -> None:
         self._reader = reader
+
+    def _get_reader(self) -> "cdec.Reader":
+        """Return the reader, creating a default instance if none was supplied."""
+        if self._reader is None:
+            self._reader = cdec.Reader()
+        return self._reader
 
     def load(self, **attributes) -> pd.DataFrame:
         station_id = attributes["ID"]
@@ -55,7 +70,7 @@ class CDECDataReferenceReader(DataReferenceReader):
         else:
             start = "1900-01-01"
             end = pd.Timestamp.now().strftime("%Y-%m-%d")
-        df = self._reader.read_station_data(
+        df = self._get_reader().read_station_data(
             station_id, sensor_number, duration_code, start, end
         )
         df = df[["VALUE"]]
@@ -68,6 +83,80 @@ class CDECDataReferenceReader(DataReferenceReader):
 
     def __repr__(self) -> str:
         return f"CDECDataReferenceReader(reader={self._reader!r})"
+
+
+class CDECDataReference(DataReference):
+    """CDEC-specific :class:`~dvue.catalog.DataReference`.
+
+    References are standalone: each instance carries enough attributes
+    (``ID``, ``Sensor Number``, ``duration_code``, ``Units``, …) for
+    :class:`CDECDataReferenceReader` to fetch data without any external
+    manager context.  This allows CDEC references to participate in
+    mixed-catalog workflows alongside references from other sources.
+
+    Use :meth:`from_catalog_row` to build instances from a GeoDataFrame row.
+    """
+
+    _REQUIRED = ("ID", "Sensor Number", "duration_code")
+
+    def __init__(self, reader=None, name: str = "", cache: bool = True, **attributes):
+        missing = [k for k in self._REQUIRED if not attributes.get(k)]
+        if missing:
+            raise ValueError(
+                f"CDECDataReference requires attributes: {missing}"
+            )
+        if reader is None:
+            reader = CDECDataReferenceReader()
+        super().__init__(reader=reader, name=name, cache=cache, **attributes)
+
+    @classmethod
+    def from_catalog_row(cls, row, reader=None):
+        """Build a standalone :class:`CDECDataReference` from a catalog row.
+
+        Parameters
+        ----------
+        row : pd.Series
+            A row from the station metadata GeoDataFrame.  Must contain at
+            minimum ``ID``, ``Sensor Number``, ``Duration``, and ``Units``.
+        reader : CDECDataReferenceReader, optional
+            Shared flyweight reader.  A new default reader is created when
+            omitted.
+        """
+        duration_code = cdec.get_duration_code(row["Duration"])
+        name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
+        attrs = {k: v for k, v in row.items() if k != "geometry"}
+        if "geometry" in row.index and row["geometry"] is not None:
+            attrs["geometry"] = row["geometry"]
+        attrs["duration_code"] = duration_code
+        return cls(reader=reader, name=name, cache=True, **attrs)
+
+    # ------------------------------------------------------------------
+    # Typed attribute accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def station_id(self) -> str:
+        return self.get_attribute("ID")
+
+    @property
+    def sensor_number(self) -> str:
+        return self.get_attribute("Sensor Number")
+
+    @property
+    def duration_code(self) -> str:
+        return self.get_attribute("duration_code")
+
+    @property
+    def unit(self) -> str:
+        return self.get_attribute("Units")
+
+    @property
+    def sensor(self) -> str:
+        return self.get_attribute("Sensor")
+
+    @property
+    def geometry(self):
+        return self.get_attribute("geometry")
 
 
 class CDECDataUIManager(TimeSeriesDataUIManager):
@@ -133,18 +222,9 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
     def _build_dvue_catalog(self, crs=None) -> DataCatalog:
         catalog = DataCatalog(crs=crs)
         for _, row in self.dfcat.iterrows():
-            duration_code = cdec.get_duration_code(row["Duration"])
-            ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
-            attrs = {k: v for k, v in row.items() if k != "geometry"}
-            if "geometry" in row.index and row["geometry"] is not None:
-                attrs["geometry"] = row["geometry"]
-            attrs["duration_code"] = duration_code
-            catalog.add(DataReference(
-                self._dvue_reader,
-                name=ref_name,
-                cache=True,
-                **attrs,
-            ))
+            catalog.add(
+                CDECDataReference.from_catalog_row(row, reader=self._dvue_reader)
+            )
         return catalog
 
     # data related methods
@@ -282,9 +362,11 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
     def get_data_for_time_range(self, row, time_range):
         duration_code = cdec.get_duration_code(row["Duration"])
         ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
-        ref = self._dvue_catalog.get(ref_name)
+        ref: CDECDataReference = self._dvue_catalog.get(ref_name)
         if self.bypass_cache:
-            self.reader.remove_from_db(row["ID"], row["Sensor Number"], duration_code)
+            self.reader.remove_from_db(
+                ref.station_id, ref.sensor_number, ref.duration_code
+            )
             ref.invalidate_cache()
         df = ref.getData(time_range=time_range)
         unit = df.attrs.get("unit", "")
