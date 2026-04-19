@@ -74,3 +74,5 @@ target/
 # pyenv python configuration file
 .python-version
 cdec_maps/_version.py
+junit.xml
+cdec_maps/_version.py
