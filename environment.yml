@@ -27,6 +27,5 @@ dependencies:
   - panel
   - diskcache
   - tqdm
-  - pip:
-    - git+https://github.com/CADWRDeltaModeling/vtools3
-    - git+https://github.com/CADWRDeltaModeling/dvue
+  - vtools3
+  - dvue
