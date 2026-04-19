@@ -229,6 +229,11 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
     def get_data_catalog(self):
         return self.dfcat
 
+    def get_data_reference(self, row):
+        duration_code = cdec.get_duration_code(row["Duration"])
+        ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
+        return self._dvue_catalog.get(ref_name)
+
     def build_station_name(self, r):
         return r["ID"]
 
@@ -484,8 +489,8 @@ def show_cdec_ui():
         geodf = gpd.GeoDataFrame(
             stations_meta_info,
             geometry=gpd.points_from_xy(
-                stations_meta_info["Latitude"],
                 stations_meta_info["Longitude"],
+                stations_meta_info["Latitude"],
                 crs="EPSG:4326",
             ),
         )
