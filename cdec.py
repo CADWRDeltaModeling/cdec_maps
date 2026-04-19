@@ -19,12 +19,13 @@ sidebar_panel = pn.Column(
     ),
     sizing_mode="stretch_both",
 )
-template = pn.template.VanillaTemplate(
+template = pn.template.FastListTemplate(
     title="CDEC Map Explorer",
     sidebar=[sidebar_panel],
     main=[main_panel],
     sidebar_width=650,
-    header_color="blue",
+    header_background="blue",
+    meta_viewport="width=device-width, initial-scale=1",
     # logo="",
 )
 

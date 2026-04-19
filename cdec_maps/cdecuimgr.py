@@ -20,7 +20,7 @@ pn.extension()
 #
 from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
 from dvue.dataui import DataUI, full_stack
-from dvue.tsdataui import TimeSeriesDataUIManager
+from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
 from . import cdec
 
 __all__ = ["CDECDataReferenceReader", "CDECDataReference", "CDECDataUIManager", "show_cdec_ui"]
@@ -155,6 +155,26 @@ class CDECDataReference(DataReference):
     @property
     def geometry(self):
         return self.get_attribute("geometry")
+
+
+class CDECTimeSeriesPlotAction(TimeSeriesPlotAction):
+    """CDEC-specific plot action: builds curve labels and titles from CDEC metadata."""
+
+    def _append_value(self, new_value, value):
+        if new_value not in value:
+            value += f'{", " if value else ""}{new_value}'
+        return value
+
+    def append_to_title_map(self, title_map, unit, r):
+        value = title_map.get(unit, ["", "", "", ""])
+        value[0] = self._append_value(r["Sensor"], value[0])
+        value[1] = self._append_value(r["ID"], value[1])
+        value[2] = self._append_value(r["Duration"], value[2])
+        value[3] = self._append_value(r["Description"], value[3])
+        title_map[unit] = value
+
+    def create_title(self, v):
+        return f"{v[1]} @ {v[2]} ({v[3]}::{v[0]})"
 
 
 class CDECDataUIManager(TimeSeriesDataUIManager):
@@ -323,29 +343,8 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
     def is_irregular(self, r):
         return False
 
-    def _append_value(self, new_value, value):
-        if new_value not in value:
-            value += f'{", " if value else ""}{new_value}'
-        return value
-
-    def append_to_title_map(self, title_map, unit, r):
-        if unit in title_map:
-            value = title_map[unit]
-        else:
-            value = ["", "", "", ""]
-        value[0] = self._append_value(r["Sensor"], value[0])
-        value[1] = self._append_value(r["ID"], value[1])
-        value[2] = self._append_value(r["Duration"], value[2])
-        value[3] = self._append_value(r["Description"], value[3])
-        title_map[unit] = value
-
-    def create_title(self, v):
-        title = f"{v[1]} @ {v[2]} ({v[3]}::{v[0]})"
-        return title
-
     def _make_plot_action(self):
-        from dvue.tsdataui import TimeSeriesPlotAction
-        return TimeSeriesPlotAction(curve_creator=self.create_curve)
+        return CDECTimeSeriesPlotAction(curve_creator=self.create_curve)
 
     def create_curve(self, df, r, unit, file_index=None):
         file_index_label = f"{file_index}:" if file_index is not None else ""
