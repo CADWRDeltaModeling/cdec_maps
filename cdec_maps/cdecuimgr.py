@@ -18,8 +18,6 @@ import panel as pn
 
 pn.extension()
 #
-from vtools.functions.filter import cosine_lanczos
-
 from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
 from dvue.dataui import DataUI, full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager

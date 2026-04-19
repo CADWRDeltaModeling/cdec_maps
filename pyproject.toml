@@ -36,6 +36,7 @@ dependencies = [
     "geoviews",
     "spatialpandas",
     "panel",
+    "vtools @ git+https://github.com/CADWRDeltaModeling/vtools3",
     "dvue @ git+https://github.com/CADWRDeltaModeling/dvue"
 ]
 
