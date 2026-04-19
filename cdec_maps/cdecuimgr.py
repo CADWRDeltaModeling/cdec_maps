@@ -343,6 +343,10 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         title = f"{v[1]} @ {v[2]} ({v[3]}::{v[0]})"
         return title
 
+    def _make_plot_action(self):
+        from dvue.tsdataui import TimeSeriesPlotAction
+        return TimeSeriesPlotAction(curve_creator=self.create_curve)
+
     def create_curve(self, df, r, unit, file_index=None):
         file_index_label = f"{file_index}:" if file_index is not None else ""
         crvlabel = f'{file_index_label}{r["ID"]}/{r["Sensor"]}/ {r["Duration"]}'
