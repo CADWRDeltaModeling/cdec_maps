@@ -346,6 +346,27 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
     def _make_plot_action(self):
         return CDECTimeSeriesPlotAction(curve_creator=self.create_curve)
 
+    def get_sidebar_disclaimer(self):
+        return pn.pane.Markdown(
+            """
+---
+**DISCLAIMER**
+
+All information provided by the Department of Water Resources on its Web pages
+and Internet sites is made available to provide immediate access for the
+convenience of interested persons. While the Department believes the information
+to be reliable, human or mechanical error remains a possibility. Therefore, the
+Department does not guarantee the accuracy, completeness, timeliness, or correct
+sequencing of the information. Neither the Department of Water Resources nor any
+of the sources of the information shall be responsible for any errors or
+omissions, or for the use or results obtained from the use of this information.
+Other specific cautionary notices may be included on other Web pages maintained
+by the Department.
+""",
+            sizing_mode="stretch_width",
+            styles={"font-size": "0.75em", "color": "#555"},
+        )
+
     def create_curve(self, df, r, unit, file_index=None):
         file_index_label = f"{file_index}:" if file_index is not None else ""
         crvlabel = f'{file_index_label}{r["ID"]}/{r["Sensor"]}/ {r["Duration"]}'
