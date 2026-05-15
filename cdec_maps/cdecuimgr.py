@@ -2,6 +2,7 @@
 # organize imports by category
 from datetime import datetime, timedelta
 from functools import lru_cache
+import logging
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -16,11 +17,13 @@ hv.extension("bokeh")
 import param
 import panel as pn
 
-pn.extension()
+#
+logger = logging.getLogger(__name__)
 #
 from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
 from dvue.dataui import DataUI, full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
+from dvue.dataui import DWR_DISCLAIMER_TEXT
 from . import cdec
 
 __all__ = ["CDECDataReferenceReader", "CDECDataReference", "CDECDataUIManager", "show_cdec_ui"]
@@ -178,7 +181,11 @@ class CDECTimeSeriesPlotAction(TimeSeriesPlotAction):
 
 
 class CDECDataUIManager(TimeSeriesDataUIManager):
-    show_math_ref_editor = param.Boolean(default=False)
+    show_math_ref_editor = param.Boolean(default=True)
+    show_clear_cache = param.Boolean(default=False)
+    show_reset_session_button = param.Boolean(default=True)
+    session_cookie_name = param.String(default="cdec_user_id")
+    disclaimer_text = DWR_DISCLAIMER_TEXT
     sensor_selections = param.ListSelector(
         objects=["RIV STG"],
         default=["RIV STG"],
@@ -217,7 +224,7 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
             else None
         )
         self._dvue_catalog = self._build_dvue_catalog(geo_crs)
-        super().__init__(filename_column="Source", **kwargs)
+        super().__init__(**kwargs)
         self.color_cycle_column = "ID"
         self.dashed_line_cycle_column = "Duration"
         self.marker_cycle_column = "Sensor"
@@ -238,21 +245,76 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         return self._dvue_catalog
 
     def _build_dvue_catalog(self, crs=None) -> DataCatalog:
-        catalog = DataCatalog(crs=crs)
-        for _, row in self.dfcat.iterrows():
-            catalog.add(
-                CDECDataReference.from_catalog_row(row, reader=self._dvue_reader)
+        import time
+        t0 = time.perf_counter()
+        # Deduplicate by the catalog primary key before building.
+        # The raw dfcat can have duplicate (ID, Sensor Number, Duration) rows
+        # (e.g. from multiple download passes) which would cause catalog.add()
+        # to raise ValueError and leave the catalog empty.
+        dedup = self.dfcat.drop_duplicates(subset=["ID", "Sensor Number", "Duration"])
+        n_raw, n_dedup = len(self.dfcat), len(dedup)
+        if n_raw != n_dedup:
+            logger.warning(
+                "_build_dvue_catalog: dropped %d duplicate rows (%d → %d)",
+                n_raw - n_dedup, n_raw, n_dedup,
             )
+        logger.info("_build_dvue_catalog: adding %d refs to catalog …", n_dedup)
+        catalog = DataCatalog(
+            primary_key=["ID", "Sensor Number", "duration_code"],
+            crs=crs,
+        )
+        skipped = 0
+        for _, row in dedup.iterrows():
+            try:
+                ref = CDECDataReference.from_catalog_row(row, reader=self._dvue_reader)
+                # Bypass catalog.add()'s O(n) pk-collision loop by inserting
+                # directly into the internal dict — bulk-load optimisation.
+                # Duplicates are already removed by the drop_duplicates() call
+                # above, so the collision check in add() is redundant here.
+                # CDEC refs always have an explicit name from from_catalog_row,
+                # and source="" so _source_index stays empty.
+                if ref.name:
+                    catalog._references[ref.name] = ref
+                else:
+                    logger.warning("_build_dvue_catalog: ref has no name, skipping row")
+                    skipped += 1
+            except Exception as exc:
+                logger.warning("_build_dvue_catalog: skipping ref — %s", exc)
+                skipped += 1
+        logger.info(
+            "_build_dvue_catalog: catalog ready — %d refs, %d skipped  (%.1fs)",
+            len(catalog._references), skipped, time.perf_counter() - t0,
+        )
         return catalog
 
     # data related methods
-    def get_data_catalog(self):
-        return self.dfcat
-
     def get_data_reference(self, row):
-        duration_code = cdec.get_duration_code(row["Duration"])
-        ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
-        return self._dvue_catalog.get(ref_name)
+        if "name" in row.index:
+            ref = self._dvue_catalog.get(row["name"])
+        else:
+            # Fallback for rows without a name column (e.g. legacy callers)
+            duration_code = cdec.get_duration_code(row["Duration"])
+            ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
+            ref = self._dvue_catalog.get(ref_name)
+        if self.bypass_cache:
+            self.reader.remove_from_db(
+                ref.station_id, ref.sensor_number, ref.duration_code
+            )
+            ref.invalidate_cache()
+        return ref
+
+    def get_data(self, df, time_range=None):
+        """Yield data for each row, applying tidal filter when requested."""
+        row_series = [row for _, row in df.iterrows()]
+        for data, row in zip(super().get_data(df, time_range=time_range), row_series):
+            if self.do_tidal_filter and data is not None and not data.empty:
+                duration_code = cdec.get_duration_code(row["Duration"])
+                if duration_code == "E":
+                    freq_str = pd.infer_freq(data.index)
+                    data = data.resample(freq_str or "15min").mean()
+                else:
+                    data = data.resample(duration_code).mean()
+            yield data
 
     def build_station_name(self, r):
         return r["ID"]
@@ -346,26 +408,8 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
     def _make_plot_action(self):
         return CDECTimeSeriesPlotAction(curve_creator=self.create_curve)
 
-    def get_sidebar_disclaimer(self):
-        return pn.pane.Markdown(
-            """
----
-**DISCLAIMER**
-
-All information provided by the Department of Water Resources on its Web pages
-and Internet sites is made available to provide immediate access for the
-convenience of interested persons. While the Department believes the information
-to be reliable, human or mechanical error remains a possibility. Therefore, the
-Department does not guarantee the accuracy, completeness, timeliness, or correct
-sequencing of the information. Neither the Department of Water Resources nor any
-of the sources of the information shall be responsible for any errors or
-omissions, or for the use or results obtained from the use of this information.
-Other specific cautionary notices may be included on other Web pages maintained
-by the Department.
-""",
-            sizing_mode="stretch_width",
-            styles={"font-size": "0.75em", "color": "#555"},
-        )
+    def get_data_actions(self):
+        return super().get_data_actions()
 
     def create_curve(self, df, r, unit, file_index=None):
         file_index_label = f"{file_index}:" if file_index is not None else ""
@@ -385,32 +429,6 @@ by the Department.
             active_tools=["wheel_zoom"],
             tools=["hover"],
         )
-
-    def get_data_for_time_range(self, row, time_range):
-        duration_code = cdec.get_duration_code(row["Duration"])
-        ref_name = f"{row['ID']}/{row['Sensor Number']}/{duration_code}"
-        ref: CDECDataReference = self._dvue_catalog.get(ref_name)
-        if self.bypass_cache:
-            self.reader.remove_from_db(
-                ref.station_id, ref.sensor_number, ref.duration_code
-            )
-            ref.invalidate_cache()
-        df = ref.getData(time_range=time_range)
-        unit = df.attrs.get("unit", "")
-        ptype = df.attrs.get("ptype", "period-averaged")
-        # infer freq type if tidal filtering is needed
-        if self.do_tidal_filter:
-            # if duration code is given use that else infer from the data
-            if duration_code == "E":
-                freq_str = pd.infer_freq(df.index)
-                if freq_str:
-                    df = df.resample(freq_str).mean()
-                else:
-                    # assume 15min data
-                    df = df.resample("15min").mean()
-            else:
-                df = df.resample(duration_code).mean()
-        return df, unit, ptype
 
     # methods below if geolocation data is available
     def get_tooltips(self):
@@ -441,7 +459,11 @@ by the Department.
         return list(MarkerType)
 
     def get_version(self):
-        return "1.0.0 - 2/3/2025"
+        try:
+            from cdec_maps._version import version
+            return version
+        except Exception:
+            return "unknown"
 
     def get_about_text(self):
         return """
@@ -525,4 +547,4 @@ def show_cdec_ui():
     )
     uimgr = CDECDataUIManager(geodf, reader, time_range=time_range)
     ui = DataUI(uimgr, crs=crs_cartopy, station_id_column="ID")
-    return ui.create_view()
+    return ui.create_view(), ui
