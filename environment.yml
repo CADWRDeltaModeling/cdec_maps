@@ -25,7 +25,8 @@ dependencies:
   - geoviews
   #- spatialpandas
   - panel
+  - panel-material-ui
   - diskcache
   - tqdm
   - vtools3
-  - dvue
+  #- dvue
