@@ -9,7 +9,7 @@
 
 ## Live Dashboard
 
-> **Try it now:** [https://cdecmap.azurewebsites.net/cdec](https://cdecmap.azurewebsites.net/cdec)
+> **Try it now:** [https://cdecmap.azurewebsites.net/cdec-map-explorer](https://cdecmap.azurewebsites.net/cdec-map-explorer)
 
 ![CDEC Maps Dashboard](docs/dashboard_screenshot.png)
 
