@@ -51,7 +51,7 @@ param(
     [string]$AppDir = "/home/data/cdec-maps",
     [string]$Cron = "0 10 * * *",
     [int]$ReplicaTimeoutSeconds = 28800,
-    [int]$ReplicaRetryLimit = 1,
+    [int]$ReplicaRetryLimit = 0,
     [double]$Cpu = 1.0,
     [string]$Memory = "2Gi",
     [switch]$StartNow,
