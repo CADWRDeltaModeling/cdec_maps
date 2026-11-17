@@ -140,7 +140,8 @@ properties:
       - name: build
         image: $Image
         command: ["/bin/bash", "-c"]
-        args: ["bash $AppDir/run_cache_job.sh"]
+        # The image puts its conda env at /env and its entrypoint (not used here) normally activates it.
+        args: ["PATH=/env/bin:/usr/local/bin:/usr/bin:/bin bash $AppDir/run_cache_job.sh"]
         resources:
           cpu: $Cpu
           memory: $Memory
