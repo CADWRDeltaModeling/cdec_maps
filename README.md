@@ -140,20 +140,26 @@ df = reader.read_station_data(
 
 ## Building the Data Cache
 
-The package ships with a local Parquet database under `cdec_db/`. To refresh or rebuild the cache from CDEC:
+The package ships with a local Parquet database under `cdec_db/`. The web app only
+serves; the full build (about 20,000 series, hours on first run) runs as a scheduled
+Azure Container Apps Job on the same image and file share.
 
 ```bash
-# Download station metadata only
-python -m cdec_maps.cdec_cache_build  # calls download_all_stations_info()
-
-# Download all station data (time-series) — can take a long time
-python build_cdec_cache.py
+# Build/refresh the whole cache (station tables + all series), incremental after the first run
+python -m cdec_maps.cdec_cache_build [--dbase-dir cdec_db]
 ```
 
-Or using the provided shell script:
+- Series files and station tables are written atomically, so the app can read while a build runs.
+- A lock (`cdec_db/.build.lock`) stops two builds overlapping, and the last outcome
+  (state, timings, counts, failed series) is in `cdec_db/build_status.json`.
+- `run_cache_job.sh` is the job entry point (it exits non-zero on failure).
+- `deploy_cache_job.ps1` creates/updates the scheduled job; `-WhatIf` prints what it
+  would do, `-StartNow` runs one execution immediately:
 
-```bash
-bash run_server_cache_build.sh
+```powershell
+./deploy_cache_job.ps1 -WhatIf
+./deploy_cache_job.ps1 -StartNow
+az containerapp job execution list -g dwrbdo_dash_rg -n cdec-cache-build -o table
 ```
 
 ---
@@ -169,7 +175,8 @@ cdec_maps/
 ├── map_selection_display.py # Map widget with clickable station selection
 ├── panels.py                # Panel-based single-station multi-sensor viewer
 ├── cli.py                   # Click-based CLI
-├── cdec_cache_build.py      # Bulk cache builder
+├── cdec_cache_build.py      # Bulk cache builder (run by the scheduled job)
+├── build_job.py             # Atomic writes, build lock and status file for the builder
 └── Delta_Simplified.geojson # Sacramento-San Joaquin Delta boundary polygon
 ```
 

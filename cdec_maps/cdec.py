@@ -7,6 +7,7 @@ from urllib3.util.retry import Retry
 import functools  # Add import for lru_cache
 from io import StringIO  # Import StringIO at the module level
 
+from cdec_maps import build_job
 
 DURATION_MAP = {"(event)": "E", "(daily)": "D", "(monthly)": "M", "(hourly)": "H"}
 DURATION_MAP_INVERTED = {DURATION_MAP[k]: k for k in DURATION_MAP.keys()}
@@ -355,7 +356,10 @@ class Reader(param.Parameterized):
         )
 
     def save_to_db(self, df, station_id, sensor_number, duration_code):
-        df.to_parquet(self.build_db_path(station_id, sensor_number, duration_code))
+        # Atomic: the web app may be reading this file while a build job rewrites it.
+        build_job.atomic_to_parquet(
+            df, self.build_db_path(station_id, sensor_number, duration_code)
+        )
 
     def read_station_data(self, station_id, sensor_number, duration_code, start, end):
         """ """
@@ -423,15 +427,15 @@ class Reader(param.Parameterized):
     def save_all_stations_info(self):
         """Get all the stations and their metadata and save to a csv files locally"""
         daily_stations = self.read_daily_stations()
-        daily_stations.to_csv(f"{self.dbase_dir}/cdec_daily_stations.csv")
+        build_job.atomic_to_csv(daily_stations, f"{self.dbase_dir}/cdec_daily_stations.csv")
         realtime_stations = self.read_realtime_stations()
-        realtime_stations.to_csv(f"{self.dbase_dir}/cdec_realtime_stations.csv")
+        build_job.atomic_to_csv(realtime_stations, f"{self.dbase_dir}/cdec_realtime_stations.csv")
         stations = self.read_all_stations()
-        stations.to_csv(f"{self.dbase_dir}/cdec_all_stations.csv")
+        build_job.atomic_to_csv(stations, f"{self.dbase_dir}/cdec_all_stations.csv")
         sensor_list = self.read_sensor_list()
-        sensor_list.to_csv(f"{self.dbase_dir}/cdec_sensor_list.csv")
+        build_job.atomic_to_csv(sensor_list, f"{self.dbase_dir}/cdec_sensor_list.csv")
         stations_meta_info = self.read_all_stations_meta_info()
-        stations_meta_info.to_csv(f"{self.dbase_dir}/cdec_stations_meta_info.csv")
+        build_job.atomic_to_csv(stations_meta_info, f"{self.dbase_dir}/cdec_stations_meta_info.csv")
         return stations, sensor_list, stations_meta_info
 
     @functools.lru_cache(maxsize=8)
