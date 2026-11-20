@@ -106,6 +106,7 @@ def build_cdec_manager():
 def main():
     import cartopy.crs as ccrs
     import panel as pn
+    import panel_material_ui as pmui
     from dvue.dataui import DataUI
     from dvue.session_persistence import (
         install_session_handler,
@@ -139,7 +140,7 @@ def main():
 
     pn.extension(
         "gridstack", "tabulator", "codeeditor",
-        notifications=True, design="native",
+        notifications=True, design="material",
     )
 
     # Pre-import heavy UI modules before pn.serve() so their module-level
@@ -160,11 +161,9 @@ def main():
         reg_key = session_mgr.make_reg_key(user_id, "cdec")
         entry = session_mgr.get_entry(reg_key)
 
-        # Serve the outer VanillaTemplate immediately with a loading spinner.
-        # The heavy build runs inside pn.state.onload so the browser gets the
-        # template shell before any blocking I/O happens.
-        # VanillaTemplate renders main items full-width; FastListTemplate wraps
-        # them in Bootstrap cards which breaks GridStack height.
+        # Serve the outer Page immediately with a loading spinner.  The heavy
+        # build runs inside pn.state.onload so the browser gets the page shell
+        # before any blocking I/O happens.
         main_panel = pn.Column(
             pn.indicators.LoadingSpinner(value=True, color="primary", size=50),
             sizing_mode="stretch_both",
@@ -174,7 +173,7 @@ def main():
         )
 
         if entry:
-            # Registry hit: reuse the already-built template and DataUI;
+            # Registry hit: reuse the already-built page and DataUI;
             # only re-register per-Document hooks (they bind to curdoc).
             logger.info("make_app: registry hit for user %s — reusing session", user_id[:8] if user_id else "anon")
             template = entry["template"]
@@ -196,73 +195,32 @@ def main():
             return
 
         logger.info("make_app: new session for user %s — building manager …", user_id[:8] if user_id else "anon")
-        # header_row and modal_pane are created now so they are embedded in
-        # the Jinja HTML at page-load time.  Items appended inside
-        # pn.state.onload have no DOM placeholder, so we must pre-render
-        # these containers and swap their .objects dynamically.
-        header_row = pn.Row(sizing_mode="fixed")
-        modal_pane = pn.Column(sizing_mode="stretch_width")
-        template = pn.template.VanillaTemplate(
+        template = pmui.Page(
             title="CDEC Map Explorer",
             sidebar=[sidebar_panel],
             main=[main_panel],
             sidebar_width=450,
-            header=[header_row],
         )
-        # Append modal_pane before .servable() so the Jinja template embeds
-        # its root.  Never call template.modal.clear() after this point.
-        template.modal.append(modal_pane)
 
         def _load_app():
             try:
                 mgr = build_cdec_manager()
                 ui = DataUI(mgr, crs=crs_cartopy, station_id_column="ID")
-                ui_template = ui.create_view(title="CDEC Map Explorer")
+                ui_page = ui.create_view(title="CDEC Map Explorer")
 
-                # Move content from the inner FastListTemplate into our
-                # VanillaTemplate.  Clear the inner template so Panel doesn't
-                # try to serve the same Bokeh models from two documents.
-                sidebar_items = list(ui_template.sidebar)
-                main_items = list(ui_template.main)
-                ui_template.sidebar.clear()
-                ui_template.main.clear()
-                ui_template.modal.clear()
-
-                sidebar_panel.objects = sidebar_items
-                main_panel.objects = main_items
-
-                # Build header buttons.  Callbacks swap modal_pane.objects
-                # rather than clearing template.modal (which would remove the
-                # pre-rendered slot and leave the modal permanently empty).
-                about_text = ui.get_about_text()
-                modal_pane.objects = [about_text]
-
-                about_btn = pn.widgets.Button(
-                    name="About App", button_type="primary", icon="info-circle"
-                )
-                def _about_click(event):
-                    modal_pane.objects = [about_text]
-                    template.open_modal()
-                about_btn.on_click(_about_click)
-
-                disclaimer_content = mgr.get_sidebar_disclaimer()
-                if disclaimer_content is not None:
-                    disclaimer_btn = pn.widgets.Button(
-                        name="Disclaimer", button_type="light", icon="alert-circle"
-                    )
-                    def _disclaimer_click(event):
-                        modal_pane.objects = [disclaimer_content]
-                        template.open_modal()
-                    disclaimer_btn.on_click(_disclaimer_click)
-                    header_row.append(disclaimer_btn)
-
-                header_row.append(about_btn)
+                # Move the built content into the served Page.  The About /
+                # Disclaimer dialog lives in ui_page.main, so it moves along
+                # with it and the header buttons keep working.  Empty the inner
+                # page so the same models are not owned by two components.
+                sidebar_panel.objects = list(ui_page.sidebar)
+                main_panel.objects = list(ui_page.main)
+                template.header = list(ui_page.header)
+                ui_page.sidebar, ui_page.main, ui_page.header = [], [], []
 
                 if user_id:
                     session_mgr.set_entry(reg_key, {
                         "template": template, "ui": ui,
-                        "main_panel": main_panel, "header_row": header_row,
-                        "modal_pane": modal_pane,
+                        "main_panel": main_panel,
                     })
 
             except Exception:

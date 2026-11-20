@@ -23,7 +23,8 @@ requirements = [
     "bokeh",
     "geoviews",
     "spatialpandas",
-    "panel"
+    "panel>=1.10",
+    "panel-material-ui"
 ]
 
 setup(

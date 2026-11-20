@@ -35,7 +35,8 @@ dependencies = [
     "bokeh",
     "geoviews",
     "spatialpandas",
-    "panel",
+    "panel>=1.10",
+    "panel-material-ui",
     "vtools @ git+https://github.com/CADWRDeltaModeling/vtools3",
     "dvue @ git+https://github.com/CADWRDeltaModeling/dvue"
 ]
