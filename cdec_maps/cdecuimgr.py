@@ -1,6 +1,6 @@
 # %%
 # organize imports by category
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 import logging
 import warnings
@@ -11,6 +11,7 @@ import pandas as pd
 import geopandas as gpd
 import holoviews as hv
 import cartopy.crs as ccrs
+import panel_material_ui as pmui
 
 hv.extension("bokeh")
 # viz and ui
@@ -363,6 +364,12 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         default=["RIV STG"],
         doc="Select one or more sensors to display",
     )
+    default_window_years = param.Integer(
+        default=2,
+        bounds=(1, 20),
+        label="Default plot window (years)",
+        doc="Number of recent historical years shown initially.",
+    )
 
     bypass_cache = param.Boolean(
         default=False,
@@ -379,15 +386,14 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         geolocations is a geodataframe with station_id, and geometry columns
         This is merged with the data catalog to get the station locations.
         """
-        self.time_range = kwargs.pop("time_range", None)
+        self._requested_time_range = kwargs.pop("time_range", None)
         self.reader = reader
         self.station_id_column = kwargs.pop(
             "station_id_column", "ID"
         )  # The column in the data catalog that contains the station id
         self.dfcat = dfcat
         all_sensor_types = self.dfcat["Sensor"].unique()
-        self.param.sensor_selections.objects = all_sensor_types
-        self.sensor_selections = list(all_sensor_types)
+        self._all_sensor_types = list(all_sensor_types)
         # Build the dvue catalog
         self._dvue_reader = CDECDataReferenceReader(reader)
         geo_crs = (
@@ -397,6 +403,8 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         )
         self._dvue_catalog = self._build_dvue_catalog(geo_crs)
         super().__init__(**kwargs)
+        self.param.sensor_selections.objects = self._all_sensor_types
+        self.sensor_selections = self._all_sensor_types
         self.color_cycle_column = "ID"
         self.dashed_line_cycle_column = "Duration"
         self.marker_cycle_column = "Sensor"
@@ -410,7 +418,28 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         control_widgets = super().get_widgets()
         # control_widgets.append(pn.WidgetBox())
         # control_widgets.append(pn.Row(self.param.bypass_cache))
+        control_widgets["Data"] = pn.WidgetBox(
+            pmui.MultiChoice.from_param(
+                self.param.sensor_selections,
+                label="Sensors",
+                description="Choose one or more CDEC sensor types.",
+                sizing_mode="stretch_width",
+            ),
+        )
         return control_widgets
+
+    @param.depends("sensor_selections", watch=True)
+    def _sync_sensor_query(self):
+        dataui = getattr(self, "_dataui", None)
+        if dataui is None:
+            return
+        if not self.sensor_selections or len(self.sensor_selections) == len(
+            self.param.sensor_selections.objects
+        ):
+            dataui.query = ""
+            return
+        values = ", ".join(repr(str(value)) for value in self.sensor_selections)
+        dataui.query = f"Sensor in [{values}]"
 
     @property
     def data_catalog(self) -> DataCatalog:
@@ -513,15 +542,23 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         return None
 
     def get_time_range(self, dfcat):
-        """
-        Calculate time range from the data catalog
-        """
-        if self.time_range is None:  # last 30 days is default
-            self.time_range = (
-                datetime.now() - timedelta(days=30),
-                datetime.now(),
-            )
-        return self.time_range
+        """Return a configurable window based on the latest historical catalog date."""
+        if self._requested_time_range is not None:
+            return self._requested_time_range
+        max_year = datetime.now().year
+        if dfcat is not None and "End Date" in dfcat.columns:
+            end_dates = pd.to_datetime(dfcat["End Date"], errors="coerce")
+            end_dates = end_dates[end_dates <= pd.Timestamp.now().normalize()]
+            if not end_dates.empty:
+                max_year = int(end_dates.max().year)
+        start_year = max_year - self.default_window_years + 1
+        return (
+            pd.Timestamp(year=start_year, month=1, day=1),
+            pd.Timestamp(
+                year=max_year, month=12, day=31,
+                hour=23, minute=59, second=59,
+            ),
+        )
 
     def _get_table_column_width_map(self):
         """only columns to be displayed in the table should be included in the map"""
@@ -744,10 +781,6 @@ def show_cdec_ui():
             ),
         )
     crs_cartopy = ccrs.PlateCarree()
-    time_range = (
-        datetime.now() - timedelta(days=30),
-        datetime.now(),
-    )
-    uimgr = CDECDataUIManager(geodf, reader, time_range=time_range)
+    uimgr = CDECDataUIManager(geodf, reader)
     ui = DataUI(uimgr, crs=crs_cartopy, station_id_column="ID")
     return ui.create_view(), ui

@@ -6,15 +6,30 @@ Launch with:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Manager factory — called once per unique user session
 # ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _shared_station_catalog():
+    """Read the immutable saved station catalog once per server process."""
+    from cdec_maps import cdec
+
+    reader = cdec.Reader()
+    stations, sensor_list, stations_meta_info = reader.read_saved_stations_info()
+    return (
+        stations.copy(deep=True),
+        sensor_list.copy(deep=True),
+        stations_meta_info.copy(deep=True),
+    )
+
 
 def build_cdec_manager():
     """Build and return a fresh :class:`~cdec_maps.cdecuimgr.CDECDataUIManager`.
@@ -31,7 +46,10 @@ def build_cdec_manager():
     t0 = time.perf_counter()
     logger.info("build_cdec_manager: reading saved station info …")
     reader = cdec.Reader()
-    stations, sensor_list, stations_meta_info = reader.read_saved_stations_info()
+    stations, sensor_list, stations_meta_info = _shared_station_catalog()
+    stations = stations.copy(deep=True)
+    sensor_list = sensor_list.copy(deep=True)
+    stations_meta_info = stations_meta_info.copy(deep=True)
     logger.info(
         "build_cdec_manager: loaded %d station-sensor rows, %d sensor types  (%.1fs)",
         len(stations_meta_info), len(sensor_list), time.perf_counter() - t0,
@@ -83,15 +101,11 @@ def build_cdec_manager():
     else:
         geodf = stations_meta_info
 
-    time_range = (
-        datetime.now() - timedelta(days=30),
-        datetime.now(),
-    )
     logger.info(
         "build_cdec_manager: constructing CDECDataUIManager with %d rows …",
         len(geodf),
     )
-    mgr = CDECDataUIManager(geodf, reader, time_range=time_range)
+    mgr = CDECDataUIManager(geodf, reader)
     logger.info(
         "build_cdec_manager: done — catalog has %d refs  (total %.1fs)",
         len(mgr._dvue_catalog._references), time.perf_counter() - t0,
@@ -164,9 +178,16 @@ def main():
         # Serve the outer Page immediately with a loading spinner.  The heavy
         # build runs inside pn.state.onload so the browser gets the page shell
         # before any blocking I/O happens.
+        loading_status = pn.pane.Markdown(
+            "**Loading saved CDEC station and sensor metadata...**",
+            sizing_mode="stretch_width",
+            align="center",
+        )
         main_panel = pn.Column(
             pn.indicators.LoadingSpinner(value=True, color="primary", size=50),
+            loading_status,
             sizing_mode="stretch_both",
+            align="center",
         )
         sidebar_panel = pn.Column(
             pn.indicators.LoadingSpinner(value=True, color="primary", size=50),
@@ -199,12 +220,23 @@ def main():
             title="CDEC Map Explorer",
             sidebar=[sidebar_panel],
             main=[main_panel],
-            sidebar_width=450,
+            sidebar_width=320,
+            sidebar_open=False,
+            sidebar_variant="auto",
         )
 
-        def _load_app():
+        async def _load_app():
             try:
+                await asyncio.sleep(0)
+                loading_status.object = (
+                    "**Preparing the CDEC catalog, map, and time-range controls...**"
+                )
+                await asyncio.sleep(0)
                 mgr = build_cdec_manager()
+                loading_status.object = (
+                    "**Building the station table, map, and plot controls...**"
+                )
+                await asyncio.sleep(0)
                 ui = DataUI(mgr, crs=crs_cartopy, station_id_column="ID")
                 ui_page = ui.create_view(title="CDEC Map Explorer")
 
