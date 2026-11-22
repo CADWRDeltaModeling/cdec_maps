@@ -237,7 +237,12 @@ def main():
                     "**Building the station table, map, and plot controls...**"
                 )
                 await asyncio.sleep(0)
-                ui = DataUI(mgr, crs=crs_cartopy, station_id_column="ID")
+                ui = DataUI(
+                    mgr,
+                    crs=crs_cartopy,
+                    station_id_column="ID",
+                    initial_map_extent=(-122.65, 37.55, -121.15, 38.75),
+                )
                 ui_page = ui.create_view(title="CDEC Map Explorer")
 
                 # Move the built content into the served Page.  The About /
