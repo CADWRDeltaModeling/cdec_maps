@@ -31,48 +31,20 @@ def _shared_station_catalog():
     )
 
 
-def build_cdec_manager():
-    """Build and return a fresh :class:`~cdec_maps.cdecuimgr.CDECDataUIManager`.
-
-    All heavy I/O (reading station metadata) happens here so that it only
-    runs once per user (the in-memory registry serves returning users without
-    re-running this function).
-    """
-    import pandas as pd
+def _prepare_station_frame(stations, sensor_list, stations_meta_info):
+    """Build the immutable station frame used for all user catalogs."""
     import geopandas as gpd
-    from cdec_maps import cdec
-    from cdec_maps.cdecuimgr import CDECDataUIManager
+    import pandas as pd
 
-    t0 = time.perf_counter()
-    logger.info("build_cdec_manager: reading saved station info …")
-    reader = cdec.Reader()
-    stations, sensor_list, stations_meta_info = _shared_station_catalog()
-    stations = stations.copy(deep=True)
-    sensor_list = sensor_list.copy(deep=True)
-    stations_meta_info = stations_meta_info.copy(deep=True)
-    logger.info(
-        "build_cdec_manager: loaded %d station-sensor rows, %d sensor types  (%.1fs)",
-        len(stations_meta_info), len(sensor_list), time.perf_counter() - t0,
-    )
-
-    # Restrict to California / adjacent states lat-lon box
     stations_meta_info = stations_meta_info[
         (stations_meta_info["Latitude"] >= 30)
         & (stations_meta_info["Latitude"] <= 45)
         & (stations_meta_info["Longitude"] >= -125)
         & (stations_meta_info["Longitude"] <= -110)
-    ]
-
-    displayed_sensor_list = sensor_list["Sensor"].unique()
+    ].copy()
     stations_meta_info = stations_meta_info[
-        stations_meta_info["Sensor"].isin(displayed_sensor_list)
-    ]
-    logger.info(
-        "build_cdec_manager: %d rows after geo+sensor filter  (%.1fs)",
-        len(stations_meta_info), time.perf_counter() - t0,
-    )
-
-    # Parse date-availability column into typed Start Date / End Date columns
+        stations_meta_info["Sensor"].isin(sensor_list["Sensor"].unique())
+    ].copy()
     stations_meta_info[["Start Date", "End Date"]] = stations_meta_info[
         "Data Available"
     ].str.split(" to ", expand=True)
@@ -85,12 +57,12 @@ def build_cdec_manager():
     stations_meta_info["End Date"] = pd.to_datetime(
         stations_meta_info["End Date"], errors="coerce"
     )
-
     stations_meta_info["Source"] = "CDEC"
-    stations_meta_info["Sensor Number"] = stations_meta_info["Sensor Number"].astype(str)
-
+    stations_meta_info["Sensor Number"] = stations_meta_info[
+        "Sensor Number"
+    ].astype(str)
     if all(col in stations.columns for col in ["Latitude", "Longitude"]):
-        geodf = gpd.GeoDataFrame(
+        return gpd.GeoDataFrame(
             stations_meta_info,
             geometry=gpd.points_from_xy(
                 stations_meta_info["Longitude"],
@@ -98,14 +70,49 @@ def build_cdec_manager():
                 crs="EPSG:4326",
             ),
         )
-    else:
-        geodf = stations_meta_info
+    return stations_meta_info
 
+
+@lru_cache(maxsize=1)
+def _shared_ui_catalog():
+    """Prebuild references once and reuse their immutable data across sessions."""
+    from cdec_maps import cdec
+    from cdec_maps.cdecuimgr import CDECDataReferenceReader, CDECDataUIManager
+
+    stations, sensor_list, stations_meta_info = _shared_station_catalog()
+    geodf = _prepare_station_frame(
+        stations, sensor_list, stations_meta_info.copy(deep=True)
+    )
+    reader = cdec.Reader()
+    template = CDECDataUIManager.__new__(CDECDataUIManager)
+    template.dfcat = geodf
+    template._dvue_reader = CDECDataReferenceReader(reader)
+    crs = str(geodf.crs) if hasattr(geodf, "crs") else None
+    catalog = template._build_dvue_catalog(crs)
+    return geodf, reader, catalog
+
+
+def build_cdec_manager():
+    """Build and return a fresh :class:`~cdec_maps.cdecuimgr.CDECDataUIManager`.
+
+    All heavy I/O (reading station metadata) happens here so that it only
+    runs once per user (the in-memory registry serves returning users without
+    re-running this function).
+    """
+    from cdec_maps.cdecuimgr import CDECDataUIManager
+
+    t0 = time.perf_counter()
+    logger.info("build_cdec_manager: cloning shared station catalog …")
+    geodf, reader, shared_catalog = _shared_ui_catalog()
     logger.info(
         "build_cdec_manager: constructing CDECDataUIManager with %d rows …",
         len(geodf),
     )
-    mgr = CDECDataUIManager(geodf, reader)
+    mgr = CDECDataUIManager(
+        geodf.copy(deep=True),
+        reader,
+        shared_catalog=shared_catalog,
+    )
     logger.info(
         "build_cdec_manager: done — catalog has %d refs  (total %.1fs)",
         len(mgr._dvue_catalog._references), time.perf_counter() - t0,
@@ -160,6 +167,9 @@ def main():
     # Pre-import heavy UI modules before pn.serve() so their module-level
     # hv/pn extension() calls happen outside any live Bokeh session.
     from cdec_maps.cdecuimgr import CDECDataUIManager  # noqa: F401
+
+    logger.info("Prebuilding shared CDEC station catalog …")
+    _shared_ui_catalog()
 
     install_session_handler(cookie_name="cdec_user_id")
 

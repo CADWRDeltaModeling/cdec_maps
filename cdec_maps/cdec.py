@@ -6,6 +6,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import functools  # Add import for lru_cache
 from io import StringIO  # Import StringIO at the module level
+import csv
 
 from cdec_maps import build_job
 
@@ -16,6 +17,71 @@ import logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+CDEC_REQUEST_TIMEOUT = (10, 30)
+CDEC_STALE_LOOKBACK_YEARS = 10
+
+CDEC_CSV_COLUMNS = [
+    "STATION_ID",
+    "DURATION",
+    "SENSOR_NUMBER",
+    "SENSOR_TYPE",
+    "DATE TIME",
+    "OBS DATE",
+    "VALUE",
+    "DATA_FLAG",
+    "UNITS",
+]
+
+
+def read_cdec_csv(content):
+    """Parse CDEC CSV data, repairing extra empty fields in response rows.
+
+    CDEC occasionally emits a blank field between ``DATE TIME`` and ``OBS
+    DATE``.  The extra field makes pandas reject the complete response.  Keep
+    the fixed station/time prefix and measurement suffix, which are the parts
+    of CDEC's schema that remain unambiguous.
+    """
+    rows = csv.reader(StringIO(content))
+    try:
+        header = next(rows)
+    except StopIteration:
+        return pd.DataFrame(columns=CDEC_CSV_COLUMNS)
+    if header != CDEC_CSV_COLUMNS:
+        raise ValueError(f"Unexpected CDEC CSV columns: {header}")
+
+    normalized = []
+    for line_number, row in enumerate(rows, start=2):
+        if not row or not any(field.strip() for field in row):
+            continue
+        if len(row) > len(header):
+            extra = row[len(header) - 4 : -4]
+            if extra and all(not field.strip() for field in extra):
+                row = row[:5] + row[-4:]
+                logger.warning("Repaired malformed CDEC CSV row %d", line_number)
+            else:
+                logger.warning("Skipped malformed CDEC CSV row %d", line_number)
+                continue
+        elif len(row) < len(header):
+            logger.warning("Skipped malformed CDEC CSV row %d", line_number)
+            continue
+        normalized.append(row)
+
+    df = pd.DataFrame(normalized, columns=header)
+    categorical_columns = [
+        "STATION_ID",
+        "DURATION",
+        "SENSOR_NUMBER",
+        "SENSOR_TYPE",
+        "DATA_FLAG",
+        "UNITS",
+    ]
+    for column in categorical_columns:
+        df[column] = df[column].astype("category")
+    df["VALUE"] = pd.to_numeric(
+        df["VALUE"].replace(["---", "ART", "BRT"], pd.NA), errors="coerce"
+    )
+    return df
 
 
 def ensure_dir_exists(dir):
@@ -72,7 +138,7 @@ class Reader(param.Parameterized):
 
         # Configure retry strategy
         retry_strategy = Retry(
-            total=3,
+            total=2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET"],
             backoff_factor=1,
@@ -257,10 +323,21 @@ class Reader(param.Parameterized):
         ]
 
     def read_station_data_using_dask(
-        self, station_id, sensor_number, duration_code, start, end
+        self,
+        station_id,
+        sensor_number,
+        duration_code,
+        start,
+        end,
+        expand_to_years=True,
     ):
         """
-        Using dask with our connection pool
+        Fetch CDEC data using dask with the connection pool.
+
+        ``expand_to_years`` is used for uncached/history downloads, where
+        annual requests avoid one oversized CDEC response. Cached-data gap
+        fills disable it so a request for a few recent hours does not
+        redownload the entire current year.
         """
         # make sure start and end are in the right order, start < order
         start, end = sort_times(start, end)
@@ -268,44 +345,44 @@ class Reader(param.Parameterized):
         end_year = to_year(end) + 1
         url_template = (
             self.cdec_base_url
-            + "/dynamicapp/req/CSVDataServletPST?Stations={station_id}&SensorNums={sensor_number}&dur_code={duration_code}&Start=01-01-{start}&End=12-31-{end}+23:59"
+            + "/dynamicapp/req/CSVDataServletPST?Stations={station_id}"
+            + "&SensorNums={sensor_number}&dur_code={duration_code}"
+            + "&Start={start}&End={end}+23:59"
         )
 
-        # Prepare URLs
+        if duration_code == "M" or not expand_to_years:
+            date_ranges = [
+                (
+                    pd.Timestamp(start).strftime("%m-%d-%Y"),
+                    pd.Timestamp(end).strftime("%m-%d-%Y"),
+                )
+            ]
+        else:
+            date_ranges = [
+                (f"01-01-{year}", f"12-31-{year}")
+                for year in range(start_year, end_year)
+            ]
+
         list_urls = [
             url_template.format(
                 station_id=station_id,
                 sensor_number=sensor_number,
                 duration_code=duration_code,
-                start=syear,
-                end=syear,
+                start=range_start,
+                end=range_end,
             )
-            for syear in range(start_year, end_year)
+            for range_start, range_end in date_ranges
         ]
 
-        import io
         import dask
 
         # Define a function to fetch a single URL
         def fetch_url(url):
             try:
-                response = self.session.get(url)
+                response = self.session.get(url, timeout=CDEC_REQUEST_TIMEOUT)
                 response.raise_for_status()
                 content = response.text
-                dtype_map = {
-                    "STATION_ID": "category",
-                    "DURATION": "category",
-                    "SENSOR_NUMBER": "category",
-                    "SENSOR_TYPE": "category",
-                    "VALUE": "float",
-                    "DATA_FLAG": "category",
-                    "UNITS": "category",
-                }
-                return pd.read_csv(
-                    io.StringIO(content),
-                    dtype=dtype_map,
-                    na_values={"VALUE": ["---", "ART", "BRT"]},
-                )
+                return read_cdec_csv(content)
             except Exception as e:
                 logger.warning(f"Error fetching {url}: {e}")
                 return pd.DataFrame()
@@ -363,6 +440,7 @@ class Reader(param.Parameterized):
 
     def read_station_data(self, station_id, sensor_number, duration_code, start, end):
         """ """
+        start, end = sort_times(start, end)
         stime = pd.to_datetime(start)
         etime = pd.to_datetime(end)
         try:
@@ -380,6 +458,7 @@ class Reader(param.Parameterized):
                     duration_code,
                     start,
                     df.index.min(),
+                    expand_to_years=False,
                 )
                 df = df1.combine_first(df)
                 _needs_saving = True
@@ -390,6 +469,7 @@ class Reader(param.Parameterized):
                     duration_code,
                     df.index.max(),
                     end,
+                    expand_to_years=False,
                 )
                 df = df2.combine_first(df)
                 _needs_saving = True
@@ -403,6 +483,50 @@ class Reader(param.Parameterized):
         # trim the data down to start to end
         return df.loc[stime:etime]  # doesn't work for non-unique index
         # return df[(df.index >= stime) & (df.index <= etime)]
+
+    def read_latest_valid_station_data(
+        self,
+        station_id,
+        sensor_number,
+        duration_code,
+        before,
+        window=None,
+        max_years=CDEC_STALE_LOOKBACK_YEARS,
+    ):
+        """Find the latest valid annual block before a requested date.
+
+        CDEC station metadata can say ``to present`` after transmission has
+        stopped.  Return a short slice ending at the latest observation so
+        the UI can explain the available data rather than rendering an
+        all-missing series.
+        """
+        end_year = pd.Timestamp(before).year - 1
+        for year in range(end_year, end_year - max_years, -1):
+            try:
+                df, _ = self.read_station_data_using_dask(
+                    station_id,
+                    sensor_number,
+                    duration_code,
+                    f"{year}-01-01",
+                    f"{year}-12-31",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Latest-data lookup failed for %s/%s/%s in %s: %s",
+                    station_id,
+                    sensor_number,
+                    duration_code,
+                    year,
+                    exc,
+                )
+                continue
+            valid_index = df.index[df["VALUE"].notna()]
+            if valid_index.empty:
+                continue
+            latest = valid_index.max()
+            earliest = latest - (window or pd.Timedelta(days=30))
+            return df.loc[earliest:latest]
+        return pd.DataFrame()
 
     #
     def read_entire_station_data_for(self, station_id, sensor_number, duration_code):

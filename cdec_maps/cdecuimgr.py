@@ -30,6 +30,25 @@ from . import cdec
 __all__ = ["CDECDataReferenceReader", "CDECDataReference", "CDECDataUIManager", "show_cdec_ui"]
 
 
+def _monthly_query_time_range(time_range):
+    """Provide one year of context for sparse monthly CDEC series."""
+    start = pd.Timestamp(time_range[0])
+    end = pd.Timestamp(time_range[1])
+    if start > end:
+        start, end = end, start
+    month_start = end.to_period("M").start_time
+    minimum_start = month_start - pd.DateOffset(months=11)
+    return min(start, minimum_start), end
+
+
+def _row_time_range(row, time_range):
+    if time_range is not None and (
+        row.get("duration_code") == "M" or row.get("Duration") == "(monthly)"
+    ):
+        return _monthly_query_time_range(time_range)
+    return time_range
+
+
 class CDECDataReferenceReader(DataReferenceReader):
     """Reads a single CDEC time series given station/sensor/duration attributes.
 
@@ -85,12 +104,38 @@ class CDECDataReferenceReader(DataReferenceReader):
         df = self._get_reader().read_station_data(
             station_id, sensor_number, duration_code, start, end
         )
+        fallback_range = None
+        if duration_code != "M" and df["VALUE"].notna().sum() == 0:
+            fallback = self._get_reader().read_latest_valid_station_data(
+                station_id,
+                sensor_number,
+                duration_code,
+                end,
+            )
+            if not fallback.empty:
+                logger.warning(
+                    "load %s/%s/%s: requested range has no data; "
+                    "using latest valid window through %s",
+                    station_id,
+                    sensor_number,
+                    duration_code,
+                    fallback.index.max(),
+                )
+                df = fallback
+                fallback_range = (fallback.index.min(), fallback.index.max())
         df = df[["VALUE"]]
         df.columns = [f"{station_id}/{sensor_desc}"]
-        df = df[slice(df.first_valid_index(), df.last_valid_index())]
+        first_valid = df.first_valid_index()
+        last_valid = df.last_valid_index()
+        if first_valid is None or last_valid is None:
+            df = df.iloc[0:0]
+        else:
+            df = df.loc[first_valid:last_valid]
         ptype = "instantaneous" if duration_code == "E" else "period-averaged"
         df.attrs["unit"] = unit
         df.attrs["ptype"] = ptype
+        if fallback_range is not None:
+            df.attrs["cdec_plot_range"] = fallback_range
         # Resample to a regular frequency so the DatetimeIndex carries a freq
         # attribute — required by the vtools cosine_lanczos tidal filter.
         # Try to infer frequency from the timestamps first; fall back to the
@@ -332,6 +377,30 @@ class CDECDataReference(DataReference):
     def geometry(self):
         return self.get_attribute("geometry")
 
+    def getData(self, time_range=None) -> pd.DataFrame:
+        """Load a useful context window for CDEC's monthly observations."""
+        if self.duration_code == "M":
+            if time_range is not None:
+                time_range = _monthly_query_time_range(time_range)
+            return super().getData(time_range=time_range)
+
+        cache_key = self._make_cache_key(time_range)
+        if self._cache_enabled and cache_key in self._cached_data:
+            return self._cached_data[cache_key].copy()
+
+        data = self._load_data(time_range=time_range)
+        effective_range = data.attrs.get("cdec_plot_range", time_range)
+        if effective_range is not None and not data.empty:
+            start = pd.Timestamp(effective_range[0])
+            end = pd.Timestamp(effective_range[1])
+            data = data.loc[start:end]
+
+        self._cache_attrs_as_dynamic_metadata(data.attrs)
+        if self._cache_enabled:
+            self._cached_data[cache_key] = data
+            return data.copy()
+        return data
+
 
 class CDECTimeSeriesPlotAction(TimeSeriesPlotAction):
     """CDEC-specific plot action: builds curve labels and titles from CDEC metadata."""
@@ -387,6 +456,7 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         This is merged with the data catalog to get the station locations.
         """
         self._requested_time_range = kwargs.pop("time_range", None)
+        shared_catalog = kwargs.pop("shared_catalog", None)
         self.reader = reader
         self.station_id_column = kwargs.pop(
             "station_id_column", "ID"
@@ -401,7 +471,11 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
             if hasattr(self.dfcat, "crs") and self.dfcat.crs is not None
             else None
         )
-        self._dvue_catalog = self._build_dvue_catalog(geo_crs)
+        self._dvue_catalog = (
+            self._copy_dvue_catalog(shared_catalog)
+            if shared_catalog is not None
+            else self._build_dvue_catalog(geo_crs)
+        )
         super().__init__(**kwargs)
         self.param.sensor_selections.objects = self._all_sensor_types
         self.sensor_selections = self._all_sensor_types
@@ -488,6 +562,18 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         )
         return catalog
 
+    @staticmethod
+    def _copy_dvue_catalog(source: DataCatalog) -> DataCatalog:
+        """Copy catalog state per session while sharing read-only references."""
+        catalog = DataCatalog(primary_key=source.primary_key, crs=source._crs)
+        catalog._references = source._references.copy()
+        catalog._source_index = source._source_index.copy()
+        catalog._pk_to_name = source._pk_to_name.copy()
+        catalog._math_ref_count = source._math_ref_count
+        catalog._schema_map = source._schema_map.copy()
+        catalog._builders = list(source._builders)
+        return catalog
+
     # data related methods
     def get_data_reference(self, row):
         if "name" in row.index:
@@ -558,6 +644,14 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
                 year=max_year, month=12, day=31,
                 hour=23, minute=59, second=59,
             ),
+        )
+
+    def _process_curve_data(self, data, row, time_range):
+        """Keep sufficient history when preprocessing monthly CDEC data."""
+        if "cdec_plot_range" in data.attrs:
+            time_range = data.attrs["cdec_plot_range"]
+        return super()._process_curve_data(
+            data, row, _row_time_range(row, time_range)
         )
 
     def _get_table_column_width_map(self):
@@ -651,14 +745,16 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         crvlabel = f'{file_index_label}{r["ID"]}/{r["Sensor"]}/ {r["Duration"]}'
         ylabel = f'{r["Sensor"]} ({unit})'
         title = f'{r["Sensor"]} @ {r["ID"]} ({r["Duration"]}/{r["Description"]})'
-        irreg = False  # TODO: set this based on some metadata, but for now all is regular time series
+        irreg = r.get("Duration") == "(monthly)"
         # Rename the index to "Time" (no spaces) so Bokeh's hover @field lookup
         # resolves correctly. The raw index name "DATE TIME" (with a space) causes
         # a CDS column/template mismatch that renders as "???" in the hover tooltip.
         df_plot = df.iloc[:, [0]].copy()
         df_plot.index.name = "Time"
         if irreg:
-            crv = hv.Scatter(df_plot, label=crvlabel).redim(value=crvlabel)
+            crv = hv.Scatter(df_plot, label=crvlabel).redim(value=crvlabel).opts(
+                size=7
+            )
         else:
             crv = hv.Curve(df_plot, label=crvlabel).redim(value=crvlabel)
         return crv.opts(
