@@ -234,6 +234,55 @@ def test_cache_gap_uses_exact_range_instead_of_full_year(tmp_path, monkeypatch):
     assert data.index.max() == pd.Timestamp("2026-11-25 00:00")
 
 
+def test_cached_window_uses_parquet_predicate(tmp_path, monkeypatch):
+    reader = cdec.Reader(dbase_dir=str(tmp_path))
+    cached = pd.DataFrame(
+        {"VALUE": range(100)},
+        index=pd.date_range("2026-01-01", periods=100, freq="15min"),
+    )
+    cached.index.name = "DATE TIME"
+    reader.save_to_db(cached, "FLT", "100", "E")
+
+    def fail_full(*args, **kwargs):
+        raise AssertionError("fully cached windows must not load the full file")
+
+    monkeypatch.setattr(reader, "load_from_db", fail_full)
+
+    data = reader.read_station_data(
+        "FLT", "100", "E", "2026-01-01", "2026-01-02"
+    )
+
+    assert data.index.tolist() == list(
+        cached.index[cached.index <= pd.Timestamp("2026-01-02")]
+    )
+
+
+def test_latest_valid_prefers_cached_data(tmp_path, monkeypatch):
+    reader = cdec.Reader(dbase_dir=str(tmp_path))
+    cached = pd.DataFrame(
+        {"VALUE": [10.0, 11.0, float("nan")]},
+        index=pd.to_datetime(
+            ["2022-07-03 08:00", "2022-07-03 09:00", "2022-07-04 00:00"]
+        ),
+    )
+    reader.save_to_db(cached, "07K", "186", "H")
+
+    monkeypatch.setattr(
+        reader,
+        "read_station_data_using_dask",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("latest valid data should come from cache")
+        ),
+    )
+
+    data = reader.read_latest_valid_station_data(
+        "07K", "186", "H", "2026-11-24"
+    )
+
+    assert data.index.max() == pd.Timestamp("2022-07-03 09:00")
+    assert data["VALUE"].tolist() == [10.0, 11.0]
+
+
 def test_monthly_curve_uses_visible_scatter_points():
     data = pd.DataFrame(
         {"BLU/SNOW DP": [5.0, float("nan"), 0.0]},

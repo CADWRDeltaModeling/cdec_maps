@@ -432,6 +432,39 @@ class Reader(param.Parameterized):
             self.build_db_path(station_id, sensor_number, duration_code)
         )
 
+    def get_db_bounds(self, station_id, sensor_number, duration_code):
+        """Read cached DatetimeIndex bounds from Parquet metadata."""
+        import pyarrow.parquet as pq
+
+        path = self.build_db_path(station_id, sensor_number, duration_code)
+        parquet = pq.ParquetFile(path)
+        index_name = parquet.schema_arrow.names[-1]
+        index_position = parquet.schema_arrow.names.index(index_name)
+        minima = []
+        maxima = []
+        for group_index in range(parquet.num_row_groups):
+            stats = parquet.metadata.row_group(group_index).column(
+                index_position
+            ).statistics
+            if stats is not None and stats.has_min_max:
+                minima.append(stats.min)
+                maxima.append(stats.max)
+        if not minima:
+            raise ValueError(f"No index statistics found in {path}")
+        return pd.Timestamp(min(minima)), pd.Timestamp(max(maxima))
+
+    def load_from_db_window(
+        self, station_id, sensor_number, duration_code, start, end
+    ):
+        """Load only a timestamp window from a cached Parquet file."""
+        return pd.read_parquet(
+            self.build_db_path(station_id, sensor_number, duration_code),
+            filters=[
+                ("DATE TIME", ">=", pd.Timestamp(start)),
+                ("DATE TIME", "<=", pd.Timestamp(end)),
+            ],
+        )
+
     def save_to_db(self, df, station_id, sensor_number, duration_code):
         # Atomic: the web app may be reading this file while a build job rewrites it.
         build_job.atomic_to_parquet(
@@ -444,6 +477,13 @@ class Reader(param.Parameterized):
         stime = pd.to_datetime(start)
         etime = pd.to_datetime(end)
         try:
+            cache_start, cache_end = self.get_db_bounds(
+                station_id, sensor_number, duration_code
+            )
+            if stime >= cache_start and etime <= cache_end:
+                return self.load_from_db_window(
+                    station_id, sensor_number, duration_code, stime, etime
+                )
             df = self.load_from_db(station_id, sensor_number, duration_code)
         except Exception as e:
             df = None
@@ -501,6 +541,21 @@ class Reader(param.Parameterized):
         all-missing series.
         """
         end_year = pd.Timestamp(before).year - 1
+        try:
+            cached = self.load_from_db(
+                station_id, sensor_number, duration_code
+            )
+            valid_index = cached.index[
+                (cached.index < pd.Timestamp(before))
+                & cached["VALUE"].notna()
+            ]
+            if not valid_index.empty:
+                latest = valid_index.max()
+                earliest = latest - (window or pd.Timedelta(days=30))
+                return cached.loc[earliest:latest]
+        except Exception:
+            pass
+
         for year in range(end_year, end_year - max_years, -1):
             try:
                 df, _ = self.read_station_data_using_dask(
