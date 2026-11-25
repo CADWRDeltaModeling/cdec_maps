@@ -3,6 +3,8 @@ from cdec_maps.cdecuimgr import (
     CDECDataUIManager,
     CDECDataReference,
     CDECDataReferenceReader,
+    MAX_PLOTTED_EVENT_POINTS,
+    _thin_plot_data,
     _row_time_range,
 )
 import holoviews as hv
@@ -255,6 +257,46 @@ def test_cached_window_uses_parquet_predicate(tmp_path, monkeypatch):
     assert data.index.tolist() == list(
         cached.index[cached.index <= pd.Timestamp("2026-01-02")]
     )
+
+
+def test_cached_data_survives_failed_tail_refresh(tmp_path, monkeypatch):
+    reader = cdec.Reader(dbase_dir=str(tmp_path))
+    cached = pd.DataFrame(
+        {"VALUE": [1.0, 2.0]},
+        index=pd.to_datetime(["2026-11-01 00:00", "2026-11-02 00:00"]),
+    )
+    reader.save_to_db(cached, "PRM", "82", "M")
+    monkeypatch.setattr(
+        reader,
+        "read_station_data_using_dask",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConnectionError("CDEC unavailable")
+        ),
+    )
+
+    data = reader.read_station_data(
+        "PRM", "82", "M", "2026-10-21", "2026-11-25"
+    )
+
+    assert data.index.min() == pd.Timestamp("2026-11-01")
+    assert data.index.max() == pd.Timestamp("2026-11-02")
+
+
+def test_event_plot_thins_dense_series():
+    data = pd.DataFrame(
+        {"value": range(MAX_PLOTTED_EVENT_POINTS * 2)},
+        index=pd.date_range(
+            "2024-01-01",
+            periods=MAX_PLOTTED_EVENT_POINTS * 2,
+            freq="15min",
+        ),
+    )
+
+    thinned = _thin_plot_data(data)
+
+    assert len(thinned) == MAX_PLOTTED_EVENT_POINTS
+    assert thinned.index[0] == data.index[0]
+    assert thinned.index[-1] == data.index[-1]
 
 
 def test_latest_valid_prefers_cached_data(tmp_path, monkeypatch):

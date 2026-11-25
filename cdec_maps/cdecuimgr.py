@@ -29,6 +29,19 @@ from . import cdec
 
 __all__ = ["CDECDataReferenceReader", "CDECDataReference", "CDECDataUIManager", "show_cdec_ui"]
 
+MAX_PLOTTED_EVENT_POINTS = 20_000
+
+
+def _thin_plot_data(data, limit=MAX_PLOTTED_EVENT_POINTS):
+    """Keep long event plots responsive without changing the source data."""
+    if len(data) <= limit:
+        return data
+    positions = [
+        index * (len(data) - 1) // (limit - 1)
+        for index in range(limit)
+    ]
+    return data.iloc[positions].copy()
+
 
 def _monthly_query_time_range(time_range):
     """Provide one year of context for sparse monthly CDEC series."""
@@ -751,6 +764,8 @@ class CDECDataUIManager(TimeSeriesDataUIManager):
         # a CDS column/template mismatch that renders as "???" in the hover tooltip.
         df_plot = df.iloc[:, [0]].copy()
         df_plot.index.name = "Time"
+        if r.get("Duration") == "(event)":
+            df_plot = _thin_plot_data(df_plot)
         if irreg:
             crv = hv.Scatter(df_plot, label=crvlabel).redim(value=crvlabel).opts(
                 size=7

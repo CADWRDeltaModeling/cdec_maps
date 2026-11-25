@@ -492,27 +492,47 @@ class Reader(param.Parameterized):
             # if there is a gap then read from CDEC
             _needs_saving = False
             if stime < df.index.min():
-                df1, _ = self.read_station_data_using_dask(
-                    station_id,
-                    sensor_number,
-                    duration_code,
-                    start,
-                    df.index.min(),
-                    expand_to_years=False,
-                )
-                df = df1.combine_first(df)
-                _needs_saving = True
+                try:
+                    df1, _ = self.read_station_data_using_dask(
+                        station_id,
+                        sensor_number,
+                        duration_code,
+                        start,
+                        df.index.min(),
+                        expand_to_years=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Head refresh failed for %s/%s/%s; using cached data: %s",
+                        station_id,
+                        sensor_number,
+                        duration_code,
+                        exc,
+                    )
+                else:
+                    df = df1.combine_first(df)
+                    _needs_saving = True
             if etime > df.index.max():
-                df2, _ = self.read_station_data_using_dask(
-                    station_id,
-                    sensor_number,
-                    duration_code,
-                    df.index.max(),
-                    end,
-                    expand_to_years=False,
-                )
-                df = df2.combine_first(df)
-                _needs_saving = True
+                try:
+                    df2, _ = self.read_station_data_using_dask(
+                        station_id,
+                        sensor_number,
+                        duration_code,
+                        df.index.max(),
+                        end,
+                        expand_to_years=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Tail refresh failed for %s/%s/%s; using cached data: %s",
+                        station_id,
+                        sensor_number,
+                        duration_code,
+                        exc,
+                    )
+                else:
+                    df = df2.combine_first(df)
+                    _needs_saving = True
             if _needs_saving:
                 self.save_to_db(df, station_id, sensor_number, duration_code)
         else:
